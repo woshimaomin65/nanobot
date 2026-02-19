@@ -9,11 +9,11 @@ from pathlib import Path
 import select
 import sys
 
-import typer
-from rich.console import Console
-from rich.markdown import Markdown
-from rich.table import Table
-from rich.text import Text
+import typer  # Typer 用于声明式 CLI
+from rich.console import Console  # Rich 控制台封装，统一输出样式
+from rich.markdown import Markdown  # 将 Markdown 字符串渲染成终端富文本
+from rich.table import Table  # 表格渲染，展示配置/状态列表
+from rich.text import Text  # 基础富文本对象，用于非 Markdown 输出
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
