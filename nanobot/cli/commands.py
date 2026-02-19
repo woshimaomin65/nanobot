@@ -1,5 +1,7 @@
 """CLI commands for nanobot."""
 
+# 本模块连接 Typer 命令行：负责交互聊天、网关/服务端、渠道管理、定时任务、提供商登录与状态等功能。
+
 import asyncio
 import os
 import signal
@@ -28,14 +30,15 @@ app = typer.Typer(
 )
 
 console = Console()
+# 结束交互模式的指令（需与帮助文本保持一致）
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
 
 # ---------------------------------------------------------------------------
 # CLI input: prompt_toolkit for editing, paste, history, and display
 # ---------------------------------------------------------------------------
 
-_PROMPT_SESSION: PromptSession | None = None
-_SAVED_TERM_ATTRS = None  # original termios settings, restored on exit
+_PROMPT_SESSION: PromptSession | None = None  # 单例输入会话，整场互动复用
+_SAVED_TERM_ATTRS = None  # 记录原始终端属性，退出时恢复
 
 
 def _flush_pending_tty_input() -> None:
@@ -49,6 +52,7 @@ def _flush_pending_tty_input() -> None:
 
     try:
         import termios
+        # POSIX 终端的快捷路径：TCIFLUSH 清掉已缓冲的按键
         termios.tcflush(fd, termios.TCIFLUSH)
         return
     except Exception:
@@ -56,6 +60,7 @@ def _flush_pending_tty_input() -> None:
 
     try:
         while True:
+            # 最后手段：轮询文件描述符并丢弃缓冲字节
             ready, _, _ = select.select([fd], [], [], 0)
             if not ready:
                 break
@@ -71,6 +76,7 @@ def _restore_terminal() -> None:
         return
     try:
         import termios
+        # 使用创建输入会话时保存的终端设置
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _SAVED_TERM_ATTRS)
     except Exception:
         pass
@@ -80,7 +86,7 @@ def _init_prompt_session() -> None:
     """Create the prompt_toolkit session with persistent file history."""
     global _PROMPT_SESSION, _SAVED_TERM_ATTRS
 
-    # Save terminal state so we can restore it on exit
+    # 记录当前终端状态，方便退出时复原
     try:
         import termios
         _SAVED_TERM_ATTRS = termios.tcgetattr(sys.stdin.fileno())
@@ -88,6 +94,7 @@ def _init_prompt_session() -> None:
         pass
 
     history_file = Path.home() / ".nanobot" / "history" / "cli_history"
+    # 跨会话保存历史文件，方便下次用方向键调出记录
     history_file.parent.mkdir(parents=True, exist_ok=True)
 
     _PROMPT_SESSION = PromptSession(
@@ -100,6 +107,7 @@ def _init_prompt_session() -> None:
 def _print_agent_response(response: str, render_markdown: bool) -> None:
     """Render assistant response with consistent terminal styling."""
     content = response or ""
+    # 渲染为 Markdown 便于美观展示；可按需关闭
     body = Markdown(content) if render_markdown else Text(content)
     console.print()
     console.print(f"[cyan]{__logo__} nanobot[/cyan]")
@@ -124,6 +132,7 @@ async def _read_interactive_input_async() -> str:
         raise RuntimeError("Call _init_prompt_session() first")
     try:
         with patch_stdout():
+            # patch_stdout 会把其他线程的输出重定向到 prompt_toolkit，避免界面被打断
             return await _PROMPT_SESSION.prompt_async(
                 HTML("<b fg='ansiblue'>You:</b> "),
             )
@@ -163,6 +172,7 @@ def onboard():
     config_path = get_config_path()
     
     if config_path.exists():
+        # 如果配置已存在：允许用户选择重置为默认或增量刷新
         console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
         console.print("  [bold]y[/bold] = overwrite with defaults (existing values will be lost)")
         console.print("  [bold]N[/bold] = refresh config, keeping existing values and adding new fields")
@@ -243,6 +253,7 @@ Information about the user goes here.
     for filename, content in templates.items():
         file_path = workspace / filename
         if not file_path.exists():
+            # 只创建缺失文件，避免覆盖用户已编辑内容
             file_path.write_text(content)
             console.print(f"  [dim]Created {filename}[/dim]")
     
@@ -251,6 +262,7 @@ Information about the user goes here.
     memory_dir.mkdir(exist_ok=True)
     memory_file = memory_dir / "MEMORY.md"
     if not memory_file.exists():
+        # 脚手架式创建长期记忆文件，方便代理存放持久笔记
         memory_file.write_text("""# Long-term Memory
 
 This file stores important information that should persist across sessions.
@@ -271,6 +283,7 @@ This file stores important information that should persist across sessions.
     
     history_file = memory_dir / "HISTORY.md"
     if not history_file.exists():
+        # 滚动日志，初始化为空，其他地方追加
         history_file.write_text("")
         console.print("  [dim]Created memory/HISTORY.md[/dim]")
 
@@ -304,6 +317,7 @@ def _make_provider(config: Config):
     from nanobot.providers.registry import find_by_name
     spec = find_by_name(provider_name)
     if not model.startswith("bedrock/") and not (p and p.api_key) and not (spec and spec.is_oauth):
+        # 需要 API key 却未配置时立即报错
         console.print("[red]Error: No API key configured.[/red]")
         console.print("Set one in ~/.nanobot/config.json under providers section")
         raise typer.Exit(1)
@@ -343,6 +357,7 @@ def gateway(
     
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
     
+    # 核心服务：配置、消息总线、LLM 提供商、会话存储
     config = load_config()
     bus = MessageBus()
     provider = _make_provider(config)
@@ -370,7 +385,7 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
     )
     
-    # Set cron callback (needs agent)
+    # 设置 cron 回调（依赖 agent），使定时任务走与对话相同的处理链
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
         response = await agent.process_direct(
@@ -389,7 +404,7 @@ def gateway(
         return response
     cron.on_job = on_cron_job
     
-    # Create heartbeat service
+    # 心跳服务：周期性触发，保持 agent 活性
     async def on_heartbeat(prompt: str) -> str:
         """Execute heartbeat through the agent."""
         return await agent.process_direct(prompt, session_key="heartbeat")
@@ -419,6 +434,7 @@ def gateway(
         try:
             await cron.start()
             await heartbeat.start()
+            # 并发运行 agent 主循环与各渠道
             await asyncio.gather(
                 agent.run(),
                 channels.start_all(),
@@ -426,6 +442,7 @@ def gateway(
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         finally:
+            # 确保后台服务优雅关闭
             await agent.close_mcp()
             heartbeat.stop()
             cron.stop()
@@ -470,6 +487,7 @@ def agent(
     else:
         logger.disable("nanobot")
     
+    # AgentLoop 封装工具调用；CLI 负责进度回调和输出渲染
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -486,7 +504,7 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
     )
     
-    # Show spinner when logs are off (no output to miss); skip when logs are on
+    # logs 关闭时展示旋转指示，打开日志则跳过（避免掩盖输出）
     def _thinking_ctx():
         if logs:
             from contextlib import nullcontext
@@ -495,6 +513,7 @@ def agent(
         return console.status("[dim]nanobot is thinking...[/dim]", spinner="dots")
 
     async def _cli_progress(content: str) -> None:
+        # 用弱色显示工具/步骤的进度提示
         console.print(f"  [dim]↳ {content}[/dim]")
 
     if message:
@@ -507,7 +526,7 @@ def agent(
         
         asyncio.run(run_once())
     else:
-        # Interactive mode
+        # 交互模式：prompt_toolkit 负责历史、粘贴和重绘
         _init_prompt_session()
         console.print(f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n")
 
@@ -522,6 +541,7 @@ def agent(
             try:
                 while True:
                     try:
+                        # 清理机器人输出期间用户误键入的内容
                         _flush_pending_tty_input()
                         user_input = await _read_interactive_input_async()
                         command = user_input.strip()
@@ -545,6 +565,7 @@ def agent(
                         console.print("\nGoodbye!")
                         break
             finally:
+                # 退出循环前关闭 MCP 客户端等资源
                 await agent_loop.close_mcp()
         
         asyncio.run(run_interactive())
@@ -630,19 +651,19 @@ def _get_bridge_dir() -> Path:
     import shutil
     import subprocess
     
-    # User's bridge location
+    # 用户侧存放 bridge 的目录
     user_bridge = Path.home() / ".nanobot" / "bridge"
     
-    # Check if already built
+    # 若已构建过，直接复用
     if (user_bridge / "dist" / "index.js").exists():
         return user_bridge
     
-    # Check for npm
+    # 检查 npm 是否可用
     if not shutil.which("npm"):
         console.print("[red]npm not found. Please install Node.js >= 18.[/red]")
         raise typer.Exit(1)
     
-    # Find source bridge: first check package data, then source dir
+    # 查找 bridge 源码：优先包内，其次仓库根目录
     pkg_bridge = Path(__file__).parent.parent / "bridge"  # nanobot/bridge (installed)
     src_bridge = Path(__file__).parent.parent.parent / "bridge"  # repo root/bridge (dev)
     
@@ -659,15 +680,15 @@ def _get_bridge_dir() -> Path:
     
     console.print(f"{__logo__} Setting up bridge...")
     
-    # Copy to user directory
+    # 将源码拷贝到用户目录，避免直接修改安装包
     user_bridge.parent.mkdir(parents=True, exist_ok=True)
     if user_bridge.exists():
         shutil.rmtree(user_bridge)
     shutil.copytree(source, user_bridge, ignore=shutil.ignore_patterns("node_modules", "dist"))
     
-    # Install and build
+    # 安装依赖并构建
     try:
-        console.print("  Installing dependencies...")
+        console.print("  Installing dependencies...")  # 全量 npm install，确保原生依赖就绪
         subprocess.run(["npm", "install"], cwd=user_bridge, check=True, capture_output=True)
         
         console.print("  Building...")
@@ -690,13 +711,14 @@ def channels_login():
     from nanobot.config.loader import load_config
     
     config = load_config()
-    bridge_dir = _get_bridge_dir()
+    bridge_dir = _get_bridge_dir()  # 确保本地存在且已构建 JS bridge
     
     console.print(f"{__logo__} Starting bridge...")
     console.print("Scan the QR code to connect.\n")
     
     env = {**os.environ}
     if config.channels.whatsapp.bridge_token:
+        # 可选 token：让 bridge 连接托管服务时免交互
         env["BRIDGE_TOKEN"] = config.channels.whatsapp.bridge_token
     
     try:
@@ -743,7 +765,7 @@ def cron_list(
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
     for job in jobs:
-        # Format schedule
+        # 格式化调度描述
         if job.schedule.kind == "every":
             sched = f"every {(job.schedule.every_ms or 0) // 1000}s"
         elif job.schedule.kind == "cron":
@@ -751,7 +773,7 @@ def cron_list(
         else:
             sched = "one-time"
         
-        # Format next run
+        # 计算下次执行时间
         next_run = ""
         if job.state.next_run_at_ms:
             ts = job.state.next_run_at_ms / 1000
@@ -759,6 +781,7 @@ def cron_list(
                 tz = ZoneInfo(job.schedule.tz) if job.schedule.tz else None
                 next_run = _dt.fromtimestamp(ts, tz).strftime("%Y-%m-%d %H:%M")
             except Exception:
+                # 如果时区无效/缺失，退回本地时间格式
                 next_run = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
         
         status = "[green]enabled[/green]" if job.enabled else "[dim]disabled[/dim]"
@@ -789,13 +812,16 @@ def cron_add(
         console.print("[red]Error: --tz can only be used with --cron[/red]")
         raise typer.Exit(1)
 
-    # Determine schedule type
+    # 判定调度类型
     if every:
+        # 固定秒级间隔，存储时转为毫秒
         schedule = CronSchedule(kind="every", every_ms=every * 1000)
     elif cron_expr:
+        # 标准 cron 表达式；可选时区保证执行一致性
         schedule = CronSchedule(kind="cron", expr=cron_expr, tz=tz)
     elif at:
         import datetime
+        # ISO 时间的一次性任务
         dt = datetime.datetime.fromisoformat(at)
         schedule = CronSchedule(kind="at", at_ms=int(dt.timestamp() * 1000))
     else:
@@ -831,6 +857,7 @@ def cron_remove(
     if service.remove_job(job_id):
         console.print(f"[green]✓[/green] Removed job {job_id}")
     else:
+        # 给出明确错误而非静默失败
         console.print(f"[red]Job {job_id} not found[/red]")
 
 
@@ -848,6 +875,7 @@ def cron_enable(
     
     job = service.enable_job(job_id, enabled=not disable)
     if job:
+        # 打印状态与调用者意图保持一致
         status = "disabled" if disable else "enabled"
         console.print(f"[green]✓[/green] Job '{job.name}' {status}")
     else:
@@ -867,6 +895,7 @@ def cron_run(
     service = CronService(store_path)
     
     async def run():
+        # 委托给 cron 服务，保持回调与状态更新一致
         return await service.run_job(job_id, force=force)
     
     if asyncio.run(run()):
@@ -964,6 +993,7 @@ def _login_openai_codex() -> None:
         from oauth_cli_kit import get_token, login_oauth_interactive
         token = None
         try:
+            # 若已有 token 则直接复用，避免重复登录
             token = get_token()
         except Exception:
             pass
@@ -990,6 +1020,7 @@ def _login_github_copilot() -> None:
 
     async def _trigger():
         from litellm import acompletion
+        # litellm 首次调用时会触发 GitHub Copilot 设备授权流程
         await acompletion(model="github_copilot/gpt-4o", messages=[{"role": "user", "content": "hi"}], max_tokens=1)
 
     try:
