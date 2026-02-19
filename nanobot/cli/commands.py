@@ -43,6 +43,7 @@ _SAVED_TERM_ATTRS = None  # 记录原始终端属性，退出时恢复
 
 def _flush_pending_tty_input() -> None:
     """Drop unread keypresses typed while the model was generating output."""
+    # 目标：清空 STDIN 缓冲，防止模型输出期间的误触键盘残留到下一次输入
     try:
         fd = sys.stdin.fileno()
         if not os.isatty(fd):
@@ -72,6 +73,7 @@ def _flush_pending_tty_input() -> None:
 
 def _restore_terminal() -> None:
     """Restore terminal to its original state (echo, line buffering, etc.)."""
+    # 目标：在异常退出或 Ctrl+C 后恢复终端的回显/缓冲配置
     if _SAVED_TERM_ATTRS is None:
         return
     try:
@@ -86,7 +88,7 @@ def _init_prompt_session() -> None:
     """Create the prompt_toolkit session with persistent file history."""
     global _PROMPT_SESSION, _SAVED_TERM_ATTRS
 
-    # 记录当前终端状态，方便退出时复原
+    # 步骤1：记录当前终端状态，退出时可复原
     try:
         import termios
         _SAVED_TERM_ATTRS = termios.tcgetattr(sys.stdin.fileno())
@@ -106,6 +108,7 @@ def _init_prompt_session() -> None:
 
 def _print_agent_response(response: str, render_markdown: bool) -> None:
     """Render assistant response with consistent terminal styling."""
+    # 步骤：根据用户配置选择 Markdown/纯文本渲染，然后统一输出格式
     content = response or ""
     # 渲染为 Markdown 便于美观展示；可按需关闭
     body = Markdown(content) if render_markdown else Text(content)
@@ -117,6 +120,7 @@ def _print_agent_response(response: str, render_markdown: bool) -> None:
 
 def _is_exit_command(command: str) -> bool:
     """Return True when input should end interactive chat."""
+    # 判断用户输入是否为退出指令
     return command.lower() in EXIT_COMMANDS
 
 
@@ -128,6 +132,7 @@ async def _read_interactive_input_async() -> str:
     - History navigation (up/down arrows)
     - Clean display (no ghost characters or artifacts)
     """
+    # 入口：必须先初始化会话，否则抛出显式错误
     if _PROMPT_SESSION is None:
         raise RuntimeError("Call _init_prompt_session() first")
     try:
@@ -137,11 +142,13 @@ async def _read_interactive_input_async() -> str:
                 HTML("<b fg='ansiblue'>You:</b> "),
             )
     except EOFError as exc:
+        # prompt_toolkit 抛 EOFError 表示输入流关闭，这里转成 KeyboardInterrupt 统一处理
         raise KeyboardInterrupt from exc
 
 
 
 def version_callback(value: bool):
+    # 作为 Typer 的回调：若用户传 --version，立即打印版本并退出 CLI
     if value:
         console.print(f"{__logo__} nanobot v{__version__}")
         raise typer.Exit()
@@ -154,6 +161,7 @@ def main(
     ),
 ):
     """nanobot - Personal AI Assistant."""
+    # 主入口由 Typer 管理；此处无需逻辑，留给子命令
     pass
 
 
@@ -169,6 +177,7 @@ def onboard():
     from nanobot.config.schema import Config
     from nanobot.utils.helpers import get_workspace_path
     
+    # 步骤1：确定配置文件路径
     config_path = get_config_path()
     
     if config_path.exists():
@@ -185,17 +194,18 @@ def onboard():
             save_config(config)
             console.print(f"[green]✓[/green] Config refreshed at {config_path} (existing values preserved)")
     else:
+        # 首次运行：写入默认配置
         save_config(Config())
         console.print(f"[green]✓[/green] Created config at {config_path}")
     
-    # Create workspace
+    # 步骤2：创建工作空间目录
     workspace = get_workspace_path()
     
     if not workspace.exists():
         workspace.mkdir(parents=True, exist_ok=True)
         console.print(f"[green]✓[/green] Created workspace at {workspace}")
     
-    # Create default bootstrap files
+    # 步骤3：生成默认模板文件
     _create_workspace_templates(workspace)
     
     console.print(f"\n{__logo__} nanobot is ready!")
@@ -210,6 +220,7 @@ def onboard():
 
 def _create_workspace_templates(workspace: Path):
     """Create default workspace template files."""
+    # 预置三类说明文件，帮助用户快速理解/定制代理
     templates = {
         "AGENTS.md": """# Agent Instructions
 
@@ -298,6 +309,7 @@ def _make_provider(config: Config):
     from nanobot.providers.openai_codex_provider import OpenAICodexProvider
     from nanobot.providers.custom_provider import CustomProvider
 
+    # 读取默认模型并解析其提供商类型
     model = config.agents.defaults.model
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
@@ -308,6 +320,7 @@ def _make_provider(config: Config):
 
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     if provider_name == "custom":
+        # 直接指向自定义的 OpenAI 兼容端点
         return CustomProvider(
             api_key=p.api_key if p else "no-key",
             api_base=config.get_api_base(model) or "http://localhost:8000/v1",
@@ -322,6 +335,7 @@ def _make_provider(config: Config):
         console.print("Set one in ~/.nanobot/config.json under providers section")
         raise typer.Exit(1)
 
+    # 默认走 LiteLLM 统一转发（支持多提供商）
     return LiteLLMProvider(
         api_key=p.api_key if p else None,
         api_base=config.get_api_base(model),
@@ -367,7 +381,7 @@ def gateway(
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
     
-    # Create agent with cron service
+    # 构建 AgentLoop，注入 cron 服务、执行限制与 MCP 配置
     agent = AgentLoop(
         bus=bus,
         provider=provider,
@@ -388,6 +402,7 @@ def gateway(
     # 设置 cron 回调（依赖 agent），使定时任务走与对话相同的处理链
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
+        # 让定时任务复用对话管线，并可按需投递到外部渠道
         response = await agent.process_direct(
             job.payload.message,
             session_key=f"cron:{job.id}",
@@ -475,10 +490,11 @@ def agent(
     
     config = load_config()
     
+    # 初始化消息总线与提供商（按照配置选择）
     bus = MessageBus()
     provider = _make_provider(config)
 
-    # Create cron service for tool usage (no callback needed for CLI unless running)
+    # 为 CLI 创建 cron 服务（CLI 模式下仅用于工具调用，无回调）
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
@@ -519,6 +535,7 @@ def agent(
     if message:
         # Single message mode
         async def run_once():
+            # 单轮消息：直接调用 process_direct，然后渲染
             with _thinking_ctx():
                 response = await agent_loop.process_direct(message, session_id, on_progress=_cli_progress)
             _print_agent_response(response, render_markdown=markdown)
@@ -553,6 +570,7 @@ def agent(
                             console.print("\nGoodbye!")
                             break
                         
+                        # 将用户输入交给 agent 处理，并显示进度/结果
                         with _thinking_ctx():
                             response = await agent_loop.process_direct(user_input, session_id, on_progress=_cli_progress)
                         _print_agent_response(response, render_markdown=markdown)
@@ -585,6 +603,7 @@ def channels_status():
     """Show channel status."""
     from nanobot.config.loader import load_config
 
+    # 读取配置并逐个输出渠道开关与关键配置
     config = load_config()
 
     table = Table(title="Channel Status")
@@ -710,6 +729,7 @@ def channels_login():
     import subprocess
     from nanobot.config.loader import load_config
     
+    # 载入配置并确保 bridge 已就绪，然后运行 npm start 展示二维码
     config = load_config()
     bridge_dir = _get_bridge_dir()  # 确保本地存在且已构建 JS bridge
     
@@ -745,6 +765,7 @@ def cron_list(
     from nanobot.config.loader import get_data_dir
     from nanobot.cron.service import CronService
     
+    # 载入任务存储并查询所有/已启用的任务
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
     
@@ -808,6 +829,7 @@ def cron_add(
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronSchedule
     
+    # 校验参数组合：--tz 只能搭配 --cron
     if tz and not cron_expr:
         console.print("[red]Error: --tz can only be used with --cron[/red]")
         raise typer.Exit(1)
@@ -831,6 +853,7 @@ def cron_add(
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
     
+    # 写入新任务并反馈 ID
     job = service.add_job(
         name=name,
         schedule=schedule,
@@ -851,6 +874,7 @@ def cron_remove(
     from nanobot.config.loader import get_data_dir
     from nanobot.cron.service import CronService
     
+    # 从存储中删除指定任务
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
     
@@ -870,6 +894,7 @@ def cron_enable(
     from nanobot.config.loader import get_data_dir
     from nanobot.cron.service import CronService
     
+    # 切换任务启用状态
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
     
@@ -891,6 +916,7 @@ def cron_run(
     from nanobot.config.loader import get_data_dir
     from nanobot.cron.service import CronService
     
+    # 手动触发一次任务，可选忽略禁用状态
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
     
@@ -914,6 +940,7 @@ def status():
     """Show nanobot status."""
     from nanobot.config.loader import load_config, get_config_path
 
+    # 读取配置与工作区路径，并汇总模型/密钥配置状态
     config_path = get_config_path()
     config = load_config()
     workspace = config.workspace_path
@@ -958,6 +985,7 @@ _LOGIN_HANDLERS: dict[str, callable] = {}
 
 
 def _register_login(name: str):
+    # 装饰器工厂：把登录处理器注册到 _LOGIN_HANDLERS 映射
     def decorator(fn):
         _LOGIN_HANDLERS[name] = fn
         return fn
@@ -971,6 +999,7 @@ def provider_login(
     """Authenticate with an OAuth provider."""
     from nanobot.providers.registry import PROVIDERS
 
+    # 将参数转换为 registry 中的名称格式并查找对应 OAuth 提供商
     key = provider.replace("-", "_")
     spec = next((s for s in PROVIDERS if s.name == key and s.is_oauth), None)
     if not spec:
@@ -998,6 +1027,7 @@ def _login_openai_codex() -> None:
         except Exception:
             pass
         if not (token and token.access):
+            # 触发交互式 OAuth 登录
             console.print("[cyan]Starting interactive OAuth login...[/cyan]\n")
             token = login_oauth_interactive(
                 print_fn=lambda s: console.print(s),
@@ -1016,6 +1046,7 @@ def _login_openai_codex() -> None:
 def _login_github_copilot() -> None:
     import asyncio
 
+    # 通过 litellm 触发 GitHub Copilot 的设备授权流
     console.print("[cyan]Starting GitHub Copilot device flow...[/cyan]\n")
 
     async def _trigger():
