@@ -57,6 +57,7 @@ class AgentLoop:
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
+        # 保存依赖与默认参数
         self.bus = bus
         self.provider = provider
         self.workspace = workspace
@@ -70,6 +71,7 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
 
+        # 组件初始化：上下文、会话、工具、子代理
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
@@ -93,6 +95,7 @@ class AgentLoop:
     
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
+        # 根据配置注册内置工具集，必要时限制工作目录
         # File tools (restrict to workspace if configured)
         allowed_dir = self.workspace if self.restrict_to_workspace else None
         self.tools.register(ReadFileTool(allowed_dir=allowed_dir))
@@ -135,6 +138,7 @@ class AgentLoop:
 
     def _set_tool_context(self, channel: str, chat_id: str) -> None:
         """Update context for all tools that need routing info."""
+        # 把当前会话的路由信息传递给需要它的工具
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.set_context(channel, chat_id)
@@ -187,6 +191,7 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
 
+            # 询问 LLM，携带历史消息和可用工具定义
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
@@ -197,6 +202,7 @@ class AgentLoop:
 
             if response.has_tool_calls:
                 if on_progress:
+                    # 实时回传思考内容或调用摘要
                     clean = self._strip_think(response.content)
                     await on_progress(clean or self._tool_hint(response.tool_calls))
 
@@ -211,6 +217,7 @@ class AgentLoop:
                     }
                     for tc in response.tool_calls
                 ]
+                # 把模型的工具调用附加到消息上下文
                 messages = self.context.add_assistant_message(
                     messages, response.content, tool_call_dicts,
                     reasoning_content=response.reasoning_content,
@@ -220,6 +227,7 @@ class AgentLoop:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
+                    # 执行工具并把结果反馈给模型
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
@@ -238,11 +246,13 @@ class AgentLoop:
 
         while self._running:
             try:
+                # 等待队列中的下一条入站消息
                 msg = await asyncio.wait_for(
                     self.bus.consume_inbound(),
                     timeout=1.0
                 )
                 try:
+                    # 处理消息并将响应发回出站队列
                     response = await self._process_message(msg)
                     if response:
                         await self.bus.publish_outbound(response)
@@ -291,6 +301,7 @@ class AgentLoop:
         if msg.channel == "system":
             return await self._process_system_message(msg)
         
+        # 打日志时预览前 80 字符，便于追踪
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info(f"Processing message from {msg.channel}:{msg.sender_id}: {preview}")
         
@@ -300,7 +311,7 @@ class AgentLoop:
         # Handle slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/new":
-            # Capture messages before clearing (avoid race condition with background task)
+            # 先复制旧消息，避免后台任务读取到已清空的会话
             messages_to_archive = session.messages.copy()
             session.clear()
             self.sessions.save(session)
@@ -321,7 +332,9 @@ class AgentLoop:
         if len(session.messages) > self.memory_window:
             asyncio.create_task(self._consolidate_memory(session))
 
+        # 将路由信息注入工具（消息/子代理/定时任务）
         self._set_tool_context(msg.channel, msg.chat_id)
+        # 构造发给模型的上下文：历史、媒体、当前消息等
         initial_messages = self.context.build_messages(
             history=session.get_history(max_messages=self.memory_window),
             current_message=msg.content,
@@ -343,6 +356,7 @@ class AgentLoop:
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
         
+        # 记录响应预览与工具使用，方便排查
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
         
@@ -377,6 +391,7 @@ class AgentLoop:
             origin_channel = "cli"
             origin_chat_id = msg.chat_id
         
+        # 复用普通会话处理链路：构造上下文，运行 _run_agent_loop
         session_key = f"{origin_channel}:{origin_chat_id}"
         session = self.sessions.get_or_create(session_key)
         self._set_tool_context(origin_channel, origin_chat_id)
@@ -411,10 +426,12 @@ class AgentLoop:
         memory = MemoryStore(self.workspace)
 
         if archive_all:
+            # /new 场景：全部归档后清空会话
             old_messages = session.messages
             keep_count = 0
             logger.info(f"Memory consolidation (archive_all): {len(session.messages)} total messages archived")
         else:
+            # 普通场景：保留后半窗口，前半写入记忆文件
             keep_count = self.memory_window // 2
             if len(session.messages) <= keep_count:
                 logger.debug(f"Session {session.key}: No consolidation needed (messages={len(session.messages)}, keep={keep_count})")
@@ -508,6 +525,7 @@ Respond with ONLY valid JSON, no markdown fences."""
             The agent's response.
         """
         await self._connect_mcp()
+        # 构造入站消息对象并复用统一处理流程
         msg = InboundMessage(
             channel=channel,
             sender_id="user",
