@@ -191,7 +191,7 @@ class AgentLoop:
         while iteration < self.max_iterations:
             iteration += 1
 
-            # 询问 LLM，携带历史消息和可用工具定义
+            # 询问 LLM，携带历史消息和可用工具定义（provider.chat 由具体 provider 实现，见 nanobot/providers/*）
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
@@ -206,6 +206,7 @@ class AgentLoop:
                     clean = self._strip_think(response.content)
                     await on_progress(clean or self._tool_hint(response.tool_calls))
 
+                # 将工具调用转换成 OpenAI 格式并追加到对话上下文（context.add_assistant_message 在 context.py 里把调用信息嵌入 messages）
                 tool_call_dicts = [
                     {
                         "id": tc.id,
@@ -227,7 +228,7 @@ class AgentLoop:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
-                    # 执行工具并把结果反馈给模型
+                    # 通过 ToolRegistry.execute 分发到具体工具实现（见 nanobot/agent/tools/*），再把结果反馈给模型
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
