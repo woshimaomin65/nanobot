@@ -174,24 +174,46 @@ class AgentLoop:
         on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[str | None, list[str]]:
         """
-        Run the agent iteration loop.
+        运行代理迭代循环 (Run the agent iteration loop)。
+        
+        这是 nanobot 的核心循环，负责与 LLM 交互并执行工具调用。
+        
+        调用的主要函数:
+        - provider.chat(): 向 LLM 发送请求 (nanobot/providers/*.py)
+        - tools.get_definitions(): 获取所有工具定义 (nanobot/agent/tools/registry.py)
+        - _strip_think(): 移除 <think>...</think> 标签 (本文件)
+        - _tool_hint(): 格式化工具调用摘要 (本文件)
+        - context.add_assistant_message(): 追加助手消息 (nanobot/agent/context.py)
+        - tools.execute(): 执行工具调用 (nanobot/agent/tools/registry.py)
+        - context.add_tool_result(): 追加工具结果 (nanobot/agent/context.py)
 
         Args:
-            initial_messages: Starting messages for the LLM conversation.
-            on_progress: Optional callback to push intermediate content to the user.
+            initial_messages: 发送给 LLM 的初始消息列表
+            on_progress: 可选的回调函数，用于向用户推送中间状态
 
         Returns:
-            Tuple of (final_content, list_of_tools_used).
+            元组 (最终回复内容, 使用的工具列表)
         """
+        # 初始化对话消息列表
         messages = initial_messages
+        # 迭代计数器，防止无限循环
         iteration = 0
+        # 最终回复内容
         final_content = None
+        # 记录本次对话中使用的所有工具
         tools_used: list[str] = []
 
+        # ==================== 主循环开始 ====================
+        # 最多执行 max_iterations 次迭代，防止无限循环
         while iteration < self.max_iterations:
             iteration += 1
 
-            # 询问 LLM，携带历史消息和可用工具定义（provider.chat 由具体 provider 实现，见 nanobot/providers/*）
+            # ========== 第1步：调用 LLM ==========
+            # provider.chat() 向 LLM 发送请求
+            # - messages: 完整的对话历史
+            # - tools: 可用工具的定义（由 tools.get_definitions() 提供）
+            # - model/temperature/max_tokens: 模型参数
+            # 具体实现见 nanobot/providers/litellm_provider.py 或其他 provider
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
@@ -200,43 +222,61 @@ class AgentLoop:
                 max_tokens=self.max_tokens,
             )
 
+            # ========== 第2步：判断是否有工具调用 ==========
             if response.has_tool_calls:
+                # ---------- 2a: 推送进度通知 ----------
                 if on_progress:
-                    # 实时回传思考内容或调用摘要
+                    # _strip_think(): 移除 <think>...</think> 标签（某些模型会输出思考过程）
                     clean = self._strip_think(response.content)
+                    # _tool_hint(): 格式化工具调用摘要，如 'web_search("query")'
                     await on_progress(clean or self._tool_hint(response.tool_calls))
 
-                # 将工具调用转换成 OpenAI 格式并追加到对话上下文（context.add_assistant_message 在 context.py 里把调用信息嵌入 messages）
+                # ---------- 2b: 构建工具调用字典 ----------
+                # 将工具调用转换为 OpenAI 格式的字典列表
                 tool_call_dicts = [
                     {
-                        "id": tc.id,
-                        "type": "function",
+                        "id": tc.id,           # 工具调用的唯一标识
+                        "type": "function",    # 类型固定为 function
                         "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments)
+                            "name": tc.name,   # 工具名称，如 "web_search"
+                            "arguments": json.dumps(tc.arguments)  # 参数 JSON 字符串
                         }
                     }
                     for tc in response.tool_calls
                 ]
-                # 把模型的工具调用附加到消息上下文
+                # ---------- 2c: 追加助手消息到上下文 ----------
+                # context.add_assistant_message(): 将 LLM 的回复（含工具调用）添加到消息历史
                 messages = self.context.add_assistant_message(
                     messages, response.content, tool_call_dicts,
                     reasoning_content=response.reasoning_content,
                 )
 
+                # ---------- 2d: 执行每个工具调用 ----------
                 for tool_call in response.tool_calls:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
-                    # 通过 ToolRegistry.execute 分发到具体工具实现（见 nanobot/agent/tools/*），再把结果反馈给模型
+                    # tools.execute(): 通过 ToolRegistry 分发到具体工具实现
+                    # 工具实现见 nanobot/agent/tools/ 目录:
+                    # - filesystem.py: read_file, write_file, edit_file, list_dir
+                    # - shell.py: exec (执行命令)
+                    # - web.py: web_search, web_fetch
+                    # - message.py: message (发送消息)
+                    # - spawn.py: spawn (创建子代理)
+                    # - cron.py: cron (定时任务)
+                    # - mcp.py: MCP 服务器工具
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    # context.add_tool_result(): 将工具执行结果添加到消息历史
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
             else:
+                # ========== 第3步：无工具调用，返回最终结果 ==========
+                # 清理思考标签后作为最终回复
                 final_content = self._strip_think(response.content)
                 break
 
+        # 返回最终内容和使用的工具列表
         return final_content, tools_used
 
     async def run(self) -> None:
