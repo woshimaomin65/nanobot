@@ -26,17 +26,24 @@ class SkillsLoader:
     
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
         """
-        List all available skills.
+        列出所有可用的技能 (List all available skills)
+        
+        扫描工作区和内置技能目录，返回所有找到的技能信息。
+        工作区技能优先级高于内置技能（同名时工作区覆盖内置）。
         
         Args:
-            filter_unavailable: If True, filter out skills with unmet requirements.
+            filter_unavailable: 如果为 True，过滤掉依赖不满足的技能
         
         Returns:
-            List of skill info dicts with 'name', 'path', 'source'.
+            技能信息字典列表，每个字典包含:
+            - name: 技能名称（目录名）
+            - path: SKILL.md 文件的完整路径
+            - source: 来源，"workspace" 或 "builtin"
         """
         skills = []
         
-        # Workspace skills (highest priority)
+        # ========== 第1步：扫描工作区技能（优先级最高）==========
+        # 路径: workspace/skills/<skill_name>/SKILL.md
         if self.workspace_skills.exists():
             for skill_dir in self.workspace_skills.iterdir():
                 if skill_dir.is_dir():
@@ -44,15 +51,19 @@ class SkillsLoader:
                     if skill_file.exists():
                         skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "workspace"})
         
-        # Built-in skills
+        # ========== 第2步：扫描内置技能 ==========
+        # 路径: nanobot/skills/<skill_name>/SKILL.md
+        # 注意：如果工作区已有同名技能，则跳过内置技能
         if self.builtin_skills and self.builtin_skills.exists():
             for skill_dir in self.builtin_skills.iterdir():
                 if skill_dir.is_dir():
                     skill_file = skill_dir / "SKILL.md"
+                    # 检查是否已存在同名的工作区技能
                     if skill_file.exists() and not any(s["name"] == skill_dir.name for s in skills):
                         skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "builtin"})
         
-        # Filter by requirements
+        # ========== 第3步：过滤依赖不满足的技能 ==========
+        # _check_requirements() 检查 bins（可执行文件）和 env（环境变量）
         if filter_unavailable:
             return [s for s in skills if self._check_requirements(self._get_skill_meta(s["name"]))]
         return skills
