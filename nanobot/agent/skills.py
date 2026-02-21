@@ -19,6 +19,7 @@ class SkillsLoader:
     """
     
     def __init__(self, workspace: Path, builtin_skills_dir: Path | None = None):
+        # 工作区自定义技能目录与内置技能目录（优先读取工作区）
         self.workspace = workspace
         self.workspace_skills = workspace / "skills"
         self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
@@ -94,6 +95,7 @@ class SkillsLoader:
             content = self.load_skill(name)
             if content:
                 content = self._strip_frontmatter(content)
+                # 用统一标题包裹，方便拼接到系统提示
                 parts.append(f"### Skill: {name}\n\n{content}")
         
         return "\n\n---\n\n".join(parts) if parts else ""
@@ -143,9 +145,11 @@ class SkillsLoader:
         """Get a description of missing requirements."""
         missing = []
         requires = skill_meta.get("requires", {})
+        # 检查外部可执行文件
         for b in requires.get("bins", []):
             if not shutil.which(b):
                 missing.append(f"CLI: {b}")
+        # 检查环境变量
         for env in requires.get("env", []):
             if not os.environ.get(env):
                 missing.append(f"ENV: {env}")
@@ -177,9 +181,11 @@ class SkillsLoader:
     def _check_requirements(self, skill_meta: dict) -> bool:
         """Check if skill requirements are met (bins, env vars)."""
         requires = skill_meta.get("requires", {})
+        # 需要的可执行程序
         for b in requires.get("bins", []):
             if not shutil.which(b):
                 return False
+        # 需要的环境变量
         for env in requires.get("env", []):
             if not os.environ.get(env):
                 return False
@@ -196,6 +202,7 @@ class SkillsLoader:
         for s in self.list_skills(filter_unavailable=True):
             meta = self.get_skill_metadata(s["name"]) or {}
             skill_meta = self._parse_nanobot_metadata(meta.get("metadata", ""))
+            # 支持新旧字段：nanobot.metadata.always 或 legacy always
             if skill_meta.get("always") or meta.get("always"):
                 result.append(s["name"])
         return result
@@ -215,6 +222,7 @@ class SkillsLoader:
             return None
         
         if content.startswith("---"):
+            # 粗略解析 YAML frontmatter（键:值），避免引入额外依赖
             match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
             if match:
                 # Simple YAML parsing
